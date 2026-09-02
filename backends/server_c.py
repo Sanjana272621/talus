@@ -1,0 +1,20 @@
+from fastapi import FastAPI
+import time
+
+app = FastAPI()
+
+
+@app.get("/")
+def home():
+    return {
+        "server": "C",
+        "message": "Hello from Server C"
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "server": "C",
+        "status": "healthy"
+    }
