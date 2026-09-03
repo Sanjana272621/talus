@@ -1,6 +1,6 @@
 # talus
 
-An HTTP load balancer written in Python/FastAPI, built to explore
+An HTTP load balancer written in Python (FastAPI), built to explore
 adaptive routing and overload control for microservices — going beyond
 static round-robin toward decisions driven by live backend congestion.
 
@@ -26,19 +26,23 @@ This is a simplified, single-node analogue of Rajomon's core idea
 (dynamic, congestion-based pricing driving admission decisions) — not
 its full decentralized, multi-service token/price propagation protocol.
 
-## Project layout
-- backends/ # 3 fake backend services with different simulated latency
-    server_a.py # ~10ms
-    server_b.py # ~50ms
-    server_c.py # ~200ms
+## Project Layout
 
-- load_balancer/
-    backend.py # Backend model: EWMA latency, performance score, price
-    admission_control.py # Token bucket + congestion-based admission control
-    main.py # Adaptive load balancer (routing + circuit breaker + admission control)
-    round_robin_lb.py # Baseline load balancer for comparison
+### `backends/`
+Contains three simulated backend services with different response latencies:
+- `server_a.py` — ~10 ms latency
+- `server_b.py` — ~50 ms latency
+- `server_c.py` — ~200 ms latency
 
-- benchmark.py # Load-spike benchmark script (latency percentiles, shed rate)
+### `load_balancer/`
+Contains the core load-balancing components:
+- `backend.py` — Tracks backend state using EWMA latency, performance score, and price.
+- `admission_control.py` — Implements token-bucket and congestion-based admission control.
+- `main.py` — Implements the adaptive load balancer, including backend routing, circuit breakers, and admission control.
+- `round_robin_lb.py` — Implements a round-robin load balancer as a baseline for comparison.
+
+### `benchmark.py`
+Runs load-spike experiments and measures latency percentiles and request shed rate.
 
 
 ## How to run
