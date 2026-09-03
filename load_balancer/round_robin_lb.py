@@ -1,3 +1,4 @@
+#baseline load balancer: Round Robin
 from fastapi import FastAPI, Request
 import httpx
 from load_balancer.backend import Backend
