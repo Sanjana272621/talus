@@ -7,12 +7,15 @@ import random
 import time
 
 from load_balancer.backend import Backend
+from load_balancer.admission_control import AdmissionController, MAX_PRICE
 
 
 ALPHA = 0.2
 TIMEOUT = 2.0
 FAILURE_THRESHOLD = 3
 COOLDOWN = 5.0
+
+admission_controller = AdmissionController()
 
 
 client = httpx.AsyncClient(timeout=TIMEOUT)
@@ -85,6 +88,23 @@ def choose_backend(exclude=None):
     )[0]
 
 
+def system_price():
+    """
+    The price of serving a request right now: the cost of the
+    cheapest healthy backend. If nothing is healthy, price is
+    infinite (system fully overloaded/down).
+    """
+    healthy = [
+        backend for backend in BACKENDS
+        if backend.state != "OPEN"
+    ]
+
+    if not healthy:
+        return float("inf")
+
+    return min(backend.price() for backend in healthy)
+
+
 def record_success(backend, latency):
     backend.latency = latency
     backend.requests += 1
@@ -152,6 +172,22 @@ async def forward_request(backend):
 @app.get("/")
 async def proxy(request: Request):
 
+    client_id = request.client.host if request.client else "unknown"
+    price = system_price()
+
+    allowed, reason = admission_controller.admit(client_id, price)
+
+    if not allowed:
+        status_code = 503 if reason == "system_overloaded" else 429
+
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "error": reason,
+                "price": None if price == float("inf") else round(price, 2),
+            },
+        )
+
     attempted = set()
 
     for _ in range(len(BACKENDS)):
@@ -207,7 +243,22 @@ async def stats():
             "score": round(
                 backend.performance_score(),
                 6
-            )
+            ),
+            "price": round(backend.price(), 2)
         }
 
+    price = system_price()
+
+    result["_system"] = {
+        "price": None if price == float("inf") else round(price, 2),
+        "max_price": MAX_PRICE,
+    }
+
     return result
+
+
+@app.get("/tokens")
+async def tokens(request: Request):
+    client_id = request.client.host if request.client else "unknown"
+
+    return admission_controller.snapshot(client_id)
