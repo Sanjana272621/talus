@@ -28,13 +28,13 @@ class Backend:
         )
 
     def price(self):
-    """
-    Congestion price for this backend, inspired by Rajomon's
-    per-API pricing: cost rises with both observed latency and
-    how many requests are currently in flight. This is just the
-    inverse of performance_score, expressed as a "cost" so it
-    composes naturally with the rate limiter's token cost.
-    """
+        """
+        Congestion price for this backend, inspired by Rajomon's
+        per-API pricing: cost rises with both observed latency and
+        how many requests are currently in flight. This is just the
+        inverse of performance_score, expressed as a "cost" so it
+        composes naturally with the rate limiter's token cost.
+        """
         if self.ewma_latency is None:
             latency_ms = 1.0
         else:
