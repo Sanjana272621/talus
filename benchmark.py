@@ -1,103 +1,176 @@
-"""
-Load-spike benchmark: compares the plain round-robin baseline against
-the adaptive load balancer (EWMA routing + circuit breaker + Rajomon-
-inspired admission control) under a burst of concurrent traffic.
-
-Usage:
-    # start backends first (each in its own terminal or &):
-    uvicorn backends.server_a:app --port 9001
-    uvicorn backends.server_b:app --port 9002
-    uvicorn backends.server_c:app --port 9003
-
-    # then, to benchmark the baseline:
-    uvicorn load_balancer.round_robin_lb:app --port 8000
-    python benchmark.py --port 8000 --requests 200 --concurrency 40
-
-    # and the adaptive LB:
-    uvicorn load_balancer.main:app --port 8000
-    python benchmark.py --port 8000 --requests 200 --concurrency 40
-"""
-
 import argparse
 import asyncio
+import statistics
 import time
 
 import httpx
 
 
-async def worker(client, url, results):
-    start = time.perf_counter()
+async def worker(client, url, semaphore, results):
+    async with semaphore:
+        start = time.perf_counter()
 
-    try:
-        response = await client.get(url)
+        try:
+            response = await client.get(url)
+            status = response.status_code
+        except httpx.TimeoutException:
+            status = None
+        except httpx.RequestError:
+            status = None
+
         latency = time.perf_counter() - start
-        results.append((response.status_code, latency))
-    except (httpx.TimeoutException, httpx.RequestError):
-        latency = time.perf_counter() - start
-        results.append((None, latency))
+        results.append((status, latency))
 
 
 async def run(url, total_requests, concurrency):
     results = []
+
+    # At most `concurrency` requests can be in flight at once.
     semaphore = asyncio.Semaphore(concurrency)
 
     async with httpx.AsyncClient(timeout=5.0) as client:
 
-        async def bound_worker():
-            async with semaphore:
-                await worker(client, url, results)
+        tasks = [
+            asyncio.create_task(
+                worker(client, url, semaphore, results)
+            )
+            for _ in range(total_requests)
+        ]
 
-        await asyncio.gather(
-            *(bound_worker() for _ in range(total_requests))
-        )
+        await asyncio.gather(*tasks)
 
     return results
 
 
-def percentile(sorted_values, p):
-    if not sorted_values:
+def percentile(values, p):
+    """
+    Calculate percentile using linear interpolation.
+
+    p should be between 0 and 1.
+    Example:
+        percentile(values, 0.50) -> p50
+        percentile(values, 0.95) -> p95
+        percentile(values, 0.99) -> p99
+    """
+    if not values:
         return None
 
-    index = min(
-        len(sorted_values) - 1,
-        int(len(sorted_values) * p),
+    if not 0 <= p <= 1:
+        raise ValueError("p must be between 0 and 1")
+
+    values = sorted(values)
+
+    if len(values) == 1:
+        return values[0]
+
+    position = (len(values) - 1) * p
+
+    lower = int(position)
+    upper = min(lower + 1, len(values) - 1)
+
+    fraction = position - lower
+
+    return (
+        values[lower]
+        + fraction * (values[upper] - values[lower])
     )
 
-    return sorted_values[index]
 
+def summarize(results, elapsed):
+    latencies = [latency for _, latency in results]
 
-def summarize(results):
-    latencies = sorted(latency for _, latency in results)
+    if not latencies:
+        print("No completed requests.")
+        return
 
-    ok = sum(1 for status, _ in results if status == 200)
-    shed = sum(1 for status, _ in results if status in (429, 503))
-    errored = sum(1 for status, _ in results if status is None)
+    ok = sum(
+        1 for status, _ in results
+        if status is not None and 200 <= status < 300
+    )
 
+    shed_429 = sum(
+        1 for status, _ in results
+        if status == 429
+    )
+
+    shed_503 = sum(
+        1 for status, _ in results
+        if status == 503
+    )
+
+    errored = sum(
+        1 for status, _ in results
+        if status is None
+    )
+
+    p50 = percentile(latencies, 0.50)
+    p90 = percentile(latencies, 0.90)
+    p95 = percentile(latencies, 0.95)
+    p99 = percentile(latencies, 0.99)
+
+    throughput = len(results) / elapsed
+
+    print()
+    print("========== RESULTS ==========")
     print(f"total requests : {len(results)}")
-    print(f"  200 OK       : {ok}")
-    print(f"  429/503 shed : {shed}")
-    print(f"  errored      : {errored}")
-    print(f"p50 latency    : {percentile(latencies, 0.50) * 1000:.1f} ms")
-    print(f"p95 latency    : {percentile(latencies, 0.95) * 1000:.1f} ms")
-    print(f"p99 latency    : {percentile(latencies, 0.99) * 1000:.1f} ms")
+    print(f"2xx responses  : {ok}")
+    print(f"429 responses  : {shed_429}")
+    print(f"503 responses  : {shed_503}")
+    print(f"network errors : {errored}")
+    print()
+    print(f"p50 latency    : {p50 * 1000:.2f} ms")
+    print(f"p90 latency    : {p90 * 1000:.2f} ms")
+    print(f"p95 latency    : {p95 * 1000:.2f} ms")
+    print(f"p99 latency    : {p99 * 1000:.2f} ms")
+    print()
+    print(f"throughput     : {throughput:.2f} requests/sec")
+
+
+async def main_async(args):
+    url = f"http://127.0.0.1:{args.port}/"
+
+    print(f"URL         : {url}")
+    print(f"Requests    : {args.requests}")
+    print(f"Concurrency : {args.concurrency}")
+    print()
+
+    start = time.perf_counter()
+
+    results = await run(
+        url,
+        args.requests,
+        args.concurrency,
+    )
+
+    elapsed = time.perf_counter() - start
+
+    summarize(results, elapsed)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--requests", type=int, default=200)
-    parser.add_argument("--concurrency", type=int, default=40)
-    args = parser.parse_args()
 
-    url = f"http://127.0.0.1:{args.port}/"
-
-    print(
-        f"hitting {url} with {args.requests} requests "
-        f"at concurrency {args.concurrency}..."
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
     )
 
-    results = asyncio.run(run(url, args.requests, args.concurrency))
-    summarize(results)
+    parser.add_argument(
+        "--requests",
+        type=int,
+        default=1000,
+    )
+
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=40,
+    )
+
+    args = parser.parse_args()
+
+    asyncio.run(main_async(args))
 
 
 if __name__ == "__main__":
